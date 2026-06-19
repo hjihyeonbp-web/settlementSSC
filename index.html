@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="행사 정산">
@@ -890,7 +891,7 @@ function renderProductsList(ev){
   }
   return '<div style="display:flex;justify-content:flex-end;margin-bottom:12px;"><button class="btn btn-accent" data-action="newProduct">+ 상품 추가</button></div>'+
     '<div class="list">'+
-    ev.products.map(p=>{
+    ev.products.slice().sort((a,b)=>(a.detailName||'').localeCompare(b.detailName||'','ko',{numeric:true,sensitivity:'base'})).map(p=>{
       const artist=ev.artists.find(a=>a.id===p.artistId);
       const tag=ev.tags.find(t=>t.id===p.tagId);
       return '<div class="list-row">'+
@@ -1050,7 +1051,7 @@ function renderSalesTab(){
   const filtered=ev.products.filter(p=>
     (!state.posArtistFilter||p.artistId===state.posArtistFilter) &&
     (!state.posTagFilter||p.tagId===state.posTagFilter)
-  );
+  ).sort((a,b)=>(a.detailName||'').localeCompare(b.detailName||'','ko',{numeric:true,sensitivity:'base'}));
   return sessionSelectHTML(ev)+
     '<div class="chip-row">'+
       '<button class="chip '+(!state.posArtistFilter?'active':'')+'" data-action="posFilterArtist" data-id="">전체 작가</button>'+
