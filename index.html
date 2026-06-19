@@ -240,6 +240,12 @@ table.records tbody tr:hover{background:var(--surface-alt);}
 .img-pick .preview{width:64px;height:64px;border-radius:var(--radius-sm);background:var(--surface-alt);background-size:cover;background-position:center;flex:none;transition:opacity .15s;}
 .img-pick .preview.loading{opacity:.4;}
 .settings-subnav{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;}
+.sort-bar{display:flex;align-items:center;gap:6px;margin-bottom:14px;flex-wrap:wrap;}
+.sort-bar-label{font-size:12px;font-weight:700;color:var(--muted);white-space:nowrap;padding-right:2px;}
+.sort-chip{border:1px solid var(--border);background:transparent;color:var(--muted);padding:4px 12px;border-radius:999px;font-size:12px;font-weight:600;}
+.sort-chip.active{background:var(--accent-soft);color:var(--accent);border-color:var(--accent);}
+.list-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:12px;}
+.list-header .sort-bar{margin-bottom:0;flex:1;}
 
 .hidden{display:none !important;}
 @media (max-width:760px){
@@ -426,7 +432,8 @@ const state={
   cart:[],
   recordsFilters:{sessionId:'',artistId:'',tagId:'',q:''},
   settlementSessionId:'',
-  settlementMode:'artist'
+  settlementMode:'artist',
+  settingsSortOrders:{sessions:'created',artists:'name',tags:'name',products:'name'}
 };
 function currentEvent(){return state.events.find(e=>e.id===state.currentEventId)||null;}
 async function saveEvent(){
@@ -662,6 +669,10 @@ onAction('settingsSub',(el)=>{
   state.settingsSubTab=el.dataset.sub;
   renderTab();
 });
+onAction('setSettingsSort',(el)=>{
+  state.settingsSortOrders[el.dataset.sub]=el.dataset.key;
+  renderTab();
+});
 
 /* ---- events management ---- */
 function renderEventsList(){
@@ -692,12 +703,25 @@ onAction('switchToEvent',(el)=>{
 
 /* ---- tags ---- */
 function renderTagsList(ev){
+  const SORTS=[{k:'name',l:'이름순'},{k:'count',l:'사용 수'}];
+  const cur=state.settingsSortOrders.tags;
+  const sorted=ev.tags.slice().sort((a,b)=>{
+    if(cur==='count'){
+      return ev.products.filter(p=>p.tagId===b.id).length - ev.products.filter(p=>p.tagId===a.id).length;
+    }
+    return (a.name||'').localeCompare(b.name||'','ko',{numeric:true,sensitivity:'base'});
+  });
   if(ev.tags.length===0){
-    return '<div class="empty"><h3>태그가 없어요</h3><p>상품마다 하나씩 골라 붙이는 분류 기준이에요. 예: 키링, 스티커, 신작.</p><button class="btn btn-accent" data-action="newTag">+ 태그 추가</button></div>';
+    return '<div class="empty"><h3>태그가 없어요</h3><p>상품마다 하나씩 골라 붙이는 분류 기준이에요. 키링, 스티커, 신작 등.</p><button class="btn btn-accent" data-action="newTag">+ 태그 추가</button></div>';
   }
-  return '<div style="display:flex;justify-content:flex-end;margin-bottom:12px;"><button class="btn btn-accent" data-action="newTag">+ 태그 추가</button></div>'+
+  return '<div class="list-header">'+
+      '<div class="sort-bar"><span class="sort-bar-label">정렬</span>'+
+        SORTS.map(s=>'<button class="sort-chip '+(cur===s.k?'active':'')+'" data-action="setSettingsSort" data-sub="tags" data-key="'+s.k+'">'+s.l+'</button>').join('')+
+      '</div>'+
+      '<button class="btn btn-accent" style="flex:none;" data-action="newTag">+ 태그 추가</button>'+
+    '</div>'+
     '<div class="list">'+
-    ev.tags.map(t=>{
+    sorted.map(t=>{
       const count=ev.products.filter(p=>p.tagId===t.id).length;
       return '<div class="list-row">'+
           '<div class="main"><div class="t1">'+escapeHTML(t.name)+'</div><div class="t2">'+count+'개 상품에 사용 중</div></div>'+
@@ -751,12 +775,28 @@ onAction('deleteTagConfirmed',(el)=>{
 
 /* ---- sessions ---- */
 function renderSessionsList(ev){
+  const SORTS=[{k:'created',l:'등록순'},{k:'date',l:'날짜순'},{k:'name',l:'이름순'}];
+  const cur=state.settingsSortOrders.sessions;
+  const sorted=ev.sessions.slice().sort((a,b)=>{
+    if(cur==='date'){
+      if(!a.date&&!b.date) return 0;
+      if(!a.date) return 1; if(!b.date) return -1;
+      return a.date.localeCompare(b.date);
+    }
+    if(cur==='name') return (a.label||'').localeCompare(b.label||'','ko',{numeric:true,sensitivity:'base'});
+    return 0; // created = 등록순 유지
+  });
   if(ev.sessions.length===0){
     return '<div class="empty"><h3>세션이 없어요</h3><p>토요일, 1주차 등 원하는 단위로 세션을 만들고 날짜·메모를 남겨보세요.</p><button class="btn btn-accent" data-action="newSession">+ 세션 추가</button></div>';
   }
-  return '<div style="display:flex;justify-content:flex-end;margin-bottom:12px;"><button class="btn btn-accent" data-action="newSession">+ 세션 추가</button></div>'+
+  return '<div class="list-header">'+
+      '<div class="sort-bar"><span class="sort-bar-label">정렬</span>'+
+        SORTS.map(s=>'<button class="sort-chip '+(cur===s.k?'active':'')+'" data-action="setSettingsSort" data-sub="sessions" data-key="'+s.k+'">'+s.l+'</button>').join('')+
+      '</div>'+
+      '<button class="btn btn-accent" style="flex:none;" data-action="newSession">+ 세션 추가</button>'+
+    '</div>'+
     '<div class="list">'+
-    ev.sessions.map(s=>
+    sorted.map(s=>
       '<div class="list-row">'+
         '<div class="main">'+
           '<div class="t1">'+escapeHTML(s.label)+(s.date?' <span style="color:var(--muted);font-weight:400;">· '+fmtDate(s.date)+'</span>':'')+'</div>'+
@@ -816,12 +856,29 @@ onAction('deleteSessionConfirmed',(el)=>{
 
 /* ---- artists ---- */
 function renderArtistsList(ev){
+  const SORTS=[{k:'name',l:'이름순'},{k:'products',l:'상품 수'},{k:'sales',l:'매출순'}];
+  const cur=state.settingsSortOrders.artists;
+  const sorted=ev.artists.slice().sort((a,b)=>{
+    if(cur==='products'){
+      return ev.products.filter(p=>p.artistId===b.id).length - ev.products.filter(p=>p.artistId===a.id).length;
+    }
+    if(cur==='sales'){
+      const salesOf=(id)=>ev.transactions.reduce((s,t)=>s+t.items.filter(i=>i.artistId===id).reduce((ss,i)=>ss+i.subtotal,0),0);
+      return salesOf(b.id)-salesOf(a.id);
+    }
+    return (a.name||'').localeCompare(b.name||'','ko',{numeric:true,sensitivity:'base'});
+  });
   if(ev.artists.length===0){
     return '<div class="empty"><h3>작가가 없어요</h3><p>부스에 참여하는 작가를 등록하면 상품·매출을 작가별로 관리할 수 있어요.</p><button class="btn btn-accent" data-action="newArtist">+ 작가 추가</button></div>';
   }
-  return '<div style="display:flex;justify-content:flex-end;margin-bottom:12px;"><button class="btn btn-accent" data-action="newArtist">+ 작가 추가</button></div>'+
+  return '<div class="list-header">'+
+      '<div class="sort-bar"><span class="sort-bar-label">정렬</span>'+
+        SORTS.map(s=>'<button class="sort-chip '+(cur===s.k?'active':'')+'" data-action="setSettingsSort" data-sub="artists" data-key="'+s.k+'">'+s.l+'</button>').join('')+
+      '</div>'+
+      '<button class="btn btn-accent" style="flex:none;" data-action="newArtist">+ 작가 추가</button>'+
+    '</div>'+
     '<div class="list">'+
-    ev.artists.map(a=>
+    sorted.map(a=>
       '<div class="list-row">'+
         '<span class="swatch" style="background:'+a.color+'"></span>'+
         '<div class="main"><div class="t1">'+escapeHTML(a.name)+'</div></div>'+
@@ -886,12 +943,37 @@ onAction('deleteArtistConfirmed',(el)=>{
 
 /* ---- products ---- */
 function renderProductsList(ev){
+  const SORTS=[
+    {k:'name',l:'이름순'},{k:'price_asc',l:'가격 낮은순'},{k:'price_desc',l:'가격 높은순'},
+    {k:'artist',l:'작가순'},{k:'tag',l:'태그순'}
+  ];
+  const cur=state.settingsSortOrders.products;
+  const sorted=ev.products.slice().sort((a,b)=>{
+    if(cur==='price_asc') return (a.price||0)-(b.price||0);
+    if(cur==='price_desc') return (b.price||0)-(a.price||0);
+    if(cur==='artist'){
+      const na=(ev.artists.find(x=>x.id===a.artistId)||{}).name||'';
+      const nb=(ev.artists.find(x=>x.id===b.artistId)||{}).name||'';
+      return na.localeCompare(nb,'ko',{numeric:true,sensitivity:'base'});
+    }
+    if(cur==='tag'){
+      const na=(ev.tags.find(x=>x.id===a.tagId)||{}).name||'';
+      const nb=(ev.tags.find(x=>x.id===b.tagId)||{}).name||'';
+      return na.localeCompare(nb,'ko',{numeric:true,sensitivity:'base'});
+    }
+    return (a.detailName||'').localeCompare(b.detailName||'','ko',{numeric:true,sensitivity:'base'});
+  });
   if(ev.products.length===0){
     return '<div class="empty"><h3>상품이 없어요</h3><p>이미지와 가격을 등록하면 판매 화면에서 바로 사용할 수 있어요.</p><button class="btn btn-accent" data-action="newProduct">+ 상품 추가</button></div>';
   }
-  return '<div style="display:flex;justify-content:flex-end;margin-bottom:12px;"><button class="btn btn-accent" data-action="newProduct">+ 상품 추가</button></div>'+
+  return '<div class="list-header">'+
+      '<div class="sort-bar"><span class="sort-bar-label">정렬</span>'+
+        SORTS.map(s=>'<button class="sort-chip '+(cur===s.k?'active':'')+'" data-action="setSettingsSort" data-sub="products" data-key="'+s.k+'">'+s.l+'</button>').join('')+
+      '</div>'+
+      '<button class="btn btn-accent" style="flex:none;" data-action="newProduct">+ 상품 추가</button>'+
+    '</div>'+
     '<div class="list">'+
-    ev.products.slice().sort((a,b)=>(a.detailName||'').localeCompare(b.detailName||'','ko',{numeric:true,sensitivity:'base'})).map(p=>{
+    sorted.map(p=>{
       const artist=ev.artists.find(a=>a.id===p.artistId);
       const tag=ev.tags.find(t=>t.id===p.tagId);
       return '<div class="list-row">'+
