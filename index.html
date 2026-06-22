@@ -1606,29 +1606,45 @@ onAction('deleteTx',(el)=>{
 </script>
 <script>
 /* ============ expenses tab ============ */
+function expenseRowText(x,ev){
+  const session=ev.sessions.find(s=>s.id===x.sessionId);
+  const sessionLabel=session?escapeHTML(session.label):'전체 기간';
+  if((x.type||'common')==='separate'){
+    const fromA=ev.artists.find(a=>a.id===x.fromArtistId);
+    const toA=ev.artists.find(a=>a.id===x.toArtistId);
+    return{
+      t1:escapeHTML(x.label)+' · '+won(x.amount),
+      t2:sessionLabel+' · 별도 지출 · '+(fromA?escapeHTML(fromA.name):'?')+' → '+(toA?escapeHTML(toA.name):'?')+(x.memo?' · '+escapeHTML(x.memo):'')
+    };
+  }
+  const names=(x.splitArtistIds||[]).map(id=>{const a=ev.artists.find(y=>y.id===id);return a?a.name:null;}).filter(Boolean);
+  const splitText=names.length?names.join('/')+' 분담 (각 '+won(x.amount/names.length)+')':'공통';
+  return{
+    t1:escapeHTML(x.label)+' · '+won(x.amount),
+    t2:sessionLabel+' · 공통 지출 · '+escapeHTML(splitText)+(x.memo?' · '+escapeHTML(x.memo):'')
+  };
+}
 function renderExpensesTab(){
   const ev=currentEvent();
-  const total=ev.expenses.reduce((s,x)=>s+x.amount,0);
+  const commonTotal=ev.expenses.filter(x=>(x.type||'common')==='common').reduce((s,x)=>s+x.amount,0);
   return '<div style="display:flex;justify-content:flex-end;margin-bottom:12px;"><button class="btn btn-accent" data-action="newExpense">+ 지출 추가</button></div>'+
-    (ev.expenses.length===0?'<div class="empty"><h3>지출 내역이 없어요</h3><p>택배비, 물품보관료 같은 지출을 기록해두면 정산에 함께 반영돼요.</p></div>':
+    (ev.expenses.length===0?'<div class="empty"><h3>지출 내역이 없어요</h3><p>부스비·택배비·별도 정산 등을 기록하면 정산에 반영돼요.</p></div>':
     '<div class="list">'+
       ev.expenses.slice().sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp)).map(x=>{
-        const session=ev.sessions.find(s=>s.id===x.sessionId);
-        const splitNames=(x.splitArtistIds||[]).map(id=>{const a=ev.artists.find(y=>y.id===id);return a?a.name:null;}).filter(Boolean);
-        const splitText=splitNames.length?splitNames.join('/')+' 분담 (각 '+won(x.amount/splitNames.length)+')':'공통 지출';
+        const{t1,t2}=expenseRowText(x,ev);
         return '<div class="list-row">'+
-            '<div class="main">'+
-              '<div class="t1">'+escapeHTML(x.label)+' · '+won(x.amount)+'</div>'+
-              '<div class="t2">'+(session?escapeHTML(session.label):'전체 기간')+' · '+escapeHTML(splitText)+(x.memo?' · '+escapeHTML(x.memo):'')+'</div>'+
-            '</div>'+
+            '<div class="main"><div class="t1">'+t1+'</div><div class="t2">'+t2+'</div></div>'+
             '<div class="row-actions"><button class="btn btn-ghost" data-action="editExpense" data-id="'+x.id+'">수정</button></div>'+
           '</div>';
       }).join('')+
     '</div>'+
-    '<div style="margin-top:14px;font-size:14px;color:var(--muted);">총 지출 <strong style="color:var(--ink);">'+won(total)+'</strong></div>'
+    '<div style="margin-top:14px;font-size:14px;color:var(--muted);">공통 지출 합계 <strong style="color:var(--ink);">'+won(commonTotal)+'</strong></div>'
     );
 }
+
 let pendingSplitArtistIds=new Set();
+let pendingExpenseType='common';
+
 function splitArtistPickerHTML(ev){
   if(ev.artists.length===0) return '<p style="color:var(--muted);font-size:13px;margin:0;">등록된 작가가 없어요</p>';
   return ev.artists.map(a=>'<button type="button" class="chip '+(pendingSplitArtistIds.has(a.id)?'active':'')+'" data-action="toggleSplitArtist" data-id="'+a.id+'">'+escapeHTML(a.name)+'</button>').join('');
@@ -1639,23 +1655,65 @@ onAction('toggleSplitArtist',(el)=>{
   const area=document.getElementById('splitArtistArea');
   if(area) area.innerHTML=splitArtistPickerHTML(currentEvent());
 });
+onAction('setExpenseType',(el)=>{
+  pendingExpenseType=el.dataset.type;
+  document.querySelectorAll('[data-action="setExpenseType"]').forEach(b=>{
+    b.classList.toggle('active',b.dataset.type===pendingExpenseType);
+  });
+  const c=document.getElementById('expCommonSection');
+  const s=document.getElementById('expSeparateSection');
+  if(c) c.classList.toggle('hidden',pendingExpenseType!=='common');
+  if(s) s.classList.toggle('hidden',pendingExpenseType!=='separate');
+});
+function artistSelectHTML(fieldId,selectedId,ev){
+  return '<select class="select" id="'+fieldId+'"><option value="">선택</option>'+
+    ev.artists.map(a=>'<option value="'+a.id+'" '+(a.id===selectedId?'selected':'')+'>'+escapeHTML(a.name)+'</option>').join('')+
+  '</select>';
+}
 function expenseFormHTML(x,ev){
+  const type=(x&&x.type)||pendingExpenseType;
   const usedLabels=Array.from(new Set(ev.expenses.map(e=>e.label)));
-  return '<div class="field"><label>세션 (선택)</label><select class="select" id="f_exsession"><option value="">전체 기간</option>'+
+  return '<div class="chip-row" style="margin-bottom:14px;">'+
+      '<button type="button" class="chip '+(type==='common'?'active':'')+'" data-action="setExpenseType" data-type="common">공통 지출</button>'+
+      '<button type="button" class="chip '+(type==='separate'?'active':'')+'" data-action="setExpenseType" data-type="separate">별도 지출</button>'+
+    '</div>'+
+    '<div class="field"><label>세션 (선택)</label><select class="select" id="f_exsession"><option value="">전체 기간</option>'+
       ev.sessions.map(s=>'<option value="'+s.id+'" '+(x&&x.sessionId===s.id?'selected':'')+'>'+escapeHTML(s.label)+'</option>').join('')+
     '</select></div>'+
     '<div class="field"><label>항목명</label><input class="input" id="f_exlabel" list="exLabelList" value="'+(x?escapeHTML(x.label):'')+'">'+
       '<datalist id="exLabelList">'+usedLabels.map(l=>'<option value="'+escapeHTML(l)+'">').join('')+'</datalist>'+
     '</div>'+
     '<div class="field"><label>금액</label><input class="input" type="number" inputmode="numeric" min="0" id="f_examount" placeholder="0" value="'+(x?x.amount:'')+'"></div>'+
-    '<div class="field"><label>나눠 부담할 작가 (선택, 비워두면 공통 지출)</label>'+
-      '<div class="chip-row" id="splitArtistArea" style="margin-bottom:0;">'+splitArtistPickerHTML(ev)+'</div>'+
+    '<div id="expCommonSection" '+(type!=='common'?'class="hidden"':'')+'>'+
+      '<div class="field"><label>나눠 부담할 작가 (비워두면 전체 공통)</label>'+
+        '<div class="chip-row" id="splitArtistArea" style="margin-bottom:0;">'+splitArtistPickerHTML(ev)+'</div>'+
+      '</div>'+
+    '</div>'+
+    '<div id="expSeparateSection" '+(type!=='separate'?'class="hidden"':'')+'>'+
+      '<div class="row">'+
+        '<div class="field"><label>납부 작가 (보내는 쪽)</label>'+artistSelectHTML('f_exfrom',x&&x.fromArtistId,ev)+'</div>'+
+        '<div class="field"><label>수령 작가 (받는 쪽)</label>'+artistSelectHTML('f_exto',x&&x.toArtistId,ev)+'</div>'+
+      '</div>'+
     '</div>'+
     '<div class="field"><label>메모 (선택)</label><input class="input" id="f_exmemo" value="'+(x?escapeHTML(x.memo||''):'')+'"></div>';
+}
+function readExpenseForm(){
+  const type=pendingExpenseType;
+  return{
+    type,
+    sessionId:document.getElementById('f_exsession').value||null,
+    label:document.getElementById('f_exlabel').value.trim(),
+    amount:Number(document.getElementById('f_examount').value)||0,
+    memo:document.getElementById('f_exmemo').value.trim(),
+    splitArtistIds:type==='common'?Array.from(pendingSplitArtistIds):[],
+    fromArtistId:type==='separate'?(document.getElementById('f_exfrom').value||null):null,
+    toArtistId:type==='separate'?(document.getElementById('f_exto').value||null):null
+  };
 }
 onAction('newExpense',()=>{
   const ev=currentEvent();
   pendingSplitArtistIds=new Set();
+  pendingExpenseType='common';
   openModal('<h3>지출 추가</h3>'+expenseFormHTML(null,ev)+
     '<div class="modal-actions">'+
       '<button class="btn" data-action="closeModal">취소</button>'+
@@ -1663,15 +1721,11 @@ onAction('newExpense',()=>{
     '</div>');
 });
 onAction('saveNewExpense',async()=>{
-  const label=document.getElementById('f_exlabel').value.trim();
-  const amount=Number(document.getElementById('f_examount').value)||0;
-  if(!label){toast('항목명을 입력해주세요');return;}
+  const f=readExpenseForm();
+  if(!f.label){toast('항목명을 입력해주세요');return;}
+  if(f.type==='separate'&&(!f.fromArtistId||!f.toArtistId)){toast('납부·수령 작가를 모두 선택해주세요');return;}
   const ev=currentEvent();
-  ev.expenses.push({
-    id:uid(),sessionId:document.getElementById('f_exsession').value||null,label,amount,
-    memo:document.getElementById('f_exmemo').value.trim(),timestamp:nowISO(),
-    splitArtistIds:Array.from(pendingSplitArtistIds)
-  });
+  ev.expenses.push({id:uid(),timestamp:nowISO(),...f});
   await saveEvent();closeModal();renderTab();toast('지출을 추가했어요');
 });
 onAction('editExpense',(el)=>{
@@ -1679,6 +1733,7 @@ onAction('editExpense',(el)=>{
   const x=ev.expenses.find(e=>e.id===el.dataset.id);
   if(!x) return;
   pendingSplitArtistIds=new Set(x.splitArtistIds||[]);
+  pendingExpenseType=x.type||'common';
   openModal('<h3>지출 수정</h3>'+expenseFormHTML(x,ev)+
     '<div class="modal-actions">'+
       '<button class="btn btn-danger" data-action="deleteExpense" data-id="'+x.id+'">삭제</button>'+
@@ -1689,13 +1744,10 @@ onAction('saveEditExpense',async(el)=>{
   const ev=currentEvent();
   const x=ev.expenses.find(e=>e.id===el.dataset.id);
   if(!x) return;
-  const label=document.getElementById('f_exlabel').value.trim();
-  if(!label){toast('항목명을 입력해주세요');return;}
-  x.label=label;
-  x.amount=Number(document.getElementById('f_examount').value)||0;
-  x.sessionId=document.getElementById('f_exsession').value||null;
-  x.memo=document.getElementById('f_exmemo').value.trim();
-  x.splitArtistIds=Array.from(pendingSplitArtistIds);
+  const f=readExpenseForm();
+  if(!f.label){toast('항목명을 입력해주세요');return;}
+  if(f.type==='separate'&&(!f.fromArtistId||!f.toArtistId)){toast('납부·수령 작가를 모두 선택해주세요');return;}
+  Object.assign(x,f);
   await saveEvent();closeModal();renderTab();toast('지출을 수정했어요');
 });
 onAction('deleteExpense',(el)=>{
@@ -1745,25 +1797,56 @@ function computeBreakdown(txs,ev,mode){
   }));
   return map;
 }
-function computeExpenseShares(exps){
-  const shares=new Map();
+function computeExpenseBreakdown(exps,ev){
+  const result=new Map();
+  (ev.artists||[]).forEach(a=>result.set(a.id,{commonShare:0,owedOut:0,owedIn:0}));
   exps.forEach(x=>{
-    const ids=x.splitArtistIds||[];
-    if(ids.length===0) return;
-    const share=x.amount/ids.length;
-    ids.forEach(id=>{ shares.set(id,(shares.get(id)||0)+share); });
+    if((x.type||'common')==='separate'){
+      if(x.fromArtistId){
+        const r=result.get(x.fromArtistId)||{commonShare:0,owedOut:0,owedIn:0};
+        r.owedOut+=x.amount; result.set(x.fromArtistId,r);
+      }
+      if(x.toArtistId){
+        const r=result.get(x.toArtistId)||{commonShare:0,owedOut:0,owedIn:0};
+        r.owedIn+=x.amount; result.set(x.toArtistId,r);
+      }
+    }else{
+      const ids=x.splitArtistIds||[];
+      if(!ids.length) return;
+      const share=x.amount/ids.length;
+      ids.forEach(id=>{
+        const r=result.get(id)||{commonShare:0,owedOut:0,owedIn:0};
+        r.commonShare+=share; result.set(id,r);
+      });
+    }
   });
-  return shares;
+  return result;
 }
-function breakdownTableHTML(map,mode,expenseShares){
+/* legacy alias */
+function computeExpenseShares(exps,ev){return computeExpenseBreakdown(exps,ev||{artists:[]});}
+function breakdownTableHTML(map,mode,expBreakdown){
   const showSub=mode==='product';
   const showNet=mode==='artist';
   const nameHeader=mode==='artist'?'작가':mode==='product'?'상품':mode==='detail'?'세부품목명':'태그';
   if(map.size===0) return '<p style="color:var(--muted);font-size:14px;">판매 기록이 없어요</p>';
-  return '<table class="records"><thead><tr><th>'+nameHeader+'</th>'+(showSub?'<th>작가</th>':'')+'<th>판매 수량</th><th>매출</th>'+(showNet?'<th>지출 분담</th><th>순수익</th>':'')+'</tr></thead><tbody>'+
+  return '<table class="records"><thead><tr>'+
+      '<th>'+nameHeader+'</th>'+(showSub?'<th>작가</th>':'')+
+      '<th>수량</th><th>매출</th>'+
+      (showNet?'<th>공통 지출</th><th>별도↑보냄</th><th>별도↓받음</th><th>최종 정산액</th>':'')+
+    '</tr></thead><tbody>'+
     Array.from(map.entries()).sort((a,b)=>b[1].amount-a[1].amount).map(([key,r])=>{
-      const share=showNet?(expenseShares.get(key)||0):0;
-      return '<tr><td>'+escapeHTML(r.label)+'</td>'+(showSub?'<td>'+escapeHTML(r.sub||'미지정')+'</td>':'')+'<td>'+r.qty+'</td><td>'+won(r.amount)+'</td>'+(showNet?'<td>'+won(share)+'</td><td>'+won(r.amount-share)+'</td>':'')+'</tr>';
+      const bd=showNet?(expBreakdown&&expBreakdown.get(key))||{commonShare:0,owedOut:0,owedIn:0}:{commonShare:0,owedOut:0,owedIn:0};
+      const net=r.amount-bd.commonShare-bd.owedOut+bd.owedIn;
+      return '<tr>'+
+        '<td>'+escapeHTML(r.label)+'</td>'+(showSub?'<td>'+escapeHTML(r.sub||'미지정')+'</td>':'')+
+        '<td>'+r.qty+'</td><td>'+won(r.amount)+'</td>'+
+        (showNet?
+          '<td>'+won(bd.commonShare)+'</td>'+
+          '<td>'+(bd.owedOut>0?'-'+won(bd.owedOut):'-')+'</td>'+
+          '<td>'+(bd.owedIn>0?'+'+won(bd.owedIn):'-')+'</td>'+
+          '<td style="font-weight:700;">'+won(net)+'</td>'
+        :'')+
+      '</tr>';
     }).join('')+
   '</tbody></table>';
 }
@@ -1779,7 +1862,7 @@ function renderSettlementTab(){
   const expTotal=exps.reduce((s,x)=>s+x.amount,0);
   const net=sales-expTotal;
   const breakdown=computeBreakdown(txs,ev,mode);
-  const expenseShares=computeExpenseShares(exps);
+  const expBreakdown=computeExpenseBreakdown(exps,ev);
   const modeLabel=BREAKDOWN_MODES.find(m=>m.id===mode).label;
 
   return '<div class="row" style="flex-wrap:wrap;">'+
@@ -1805,15 +1888,23 @@ function renderSettlementTab(){
     '</div>'+
     '<div class="card" style="margin-bottom:16px;">'+
       '<div class="section-title">'+modeLabel+' 매출'+(mode==='artist'?' (지출 분담 반영)':'')+'</div>'+
-      breakdownTableHTML(breakdown,mode,expenseShares)+
+      breakdownTableHTML(breakdown,mode,expBreakdown)+
     '</div>'+
     '<div class="card" style="margin-bottom:16px;">'+
       '<div class="section-title">지출 내역</div>'+
       (exps.length===0?'<p style="color:var(--muted);font-size:14px;">지출 내역이 없어요</p>':
-      '<table class="records"><thead><tr><th>항목</th><th>금액</th><th>분담</th><th>메모</th></tr></thead><tbody>'+
+      '<table class="records"><thead><tr><th>구분</th><th>항목</th><th>금액</th><th>내용</th><th>메모</th></tr></thead><tbody>'+
         exps.map(x=>{
+          const type=(x.type||'common');
+          if(type==='separate'){
+            const fromA=ev.artists.find(a=>a.id===x.fromArtistId);
+            const toA=ev.artists.find(a=>a.id===x.toArtistId);
+            return '<tr><td><span class="badge badge-transfer">별도</span></td><td>'+escapeHTML(x.label)+'</td><td>'+won(x.amount)+'</td>'+
+              '<td>'+(fromA?escapeHTML(fromA.name):'?')+' → '+(toA?escapeHTML(toA.name):'?')+'</td><td>'+escapeHTML(x.memo||'-')+'</td></tr>';
+          }
           const names=(x.splitArtistIds||[]).map(id=>{const a=ev.artists.find(y=>y.id===id);return a?a.name:null;}).filter(Boolean);
-          return '<tr><td>'+escapeHTML(x.label)+'</td><td>'+won(x.amount)+'</td><td>'+(names.length?escapeHTML(names.join('/')):'공통')+'</td><td>'+escapeHTML(x.memo||'-')+'</td></tr>';
+          return '<tr><td><span class="badge badge-cash">공통</span></td><td>'+escapeHTML(x.label)+'</td><td>'+won(x.amount)+'</td>'+
+            '<td>'+(names.length?escapeHTML(names.join('/')):'전체')+'</td><td>'+escapeHTML(x.memo||'-')+'</td></tr>';
         }).join('')+
       '</tbody></table>')+
     '</div>'+
@@ -1843,7 +1934,7 @@ onAction('exportSummary',()=>{
   const cash=txs.filter(t=>t.paymentMethod==='cash').reduce((s,t)=>s+t.total,0);
   const transfer=txs.filter(t=>t.paymentMethod==='transfer').reduce((s,t)=>s+t.total,0);
   const expTotal=exps.reduce((s,x)=>s+x.amount,0);
-  const expenseShares=computeExpenseShares(exps);
+  const expBreakdown=computeExpenseBreakdown(exps,ev);
 
   const rows=[
     ['정산 요약',scopeLabel],
@@ -1851,11 +1942,11 @@ onAction('exportSummary',()=>{
     ['현금 매출',cash],['계좌이체 매출',transfer],['총 매출',cash+transfer],['총 지출',expTotal],['순매출',(cash+transfer)-expTotal],
     []
   ];
-  rows.push(['작가별 매출 (지출 분담 반영)']);
-  rows.push(['작가','수량','매출','지출 분담','순수익']);
+  rows.push(['작가별 매출 (지출 반영)']);
+  rows.push(['작가','수량','매출','공통 지출','별도↑보냄','별도↓받음','최종 정산액']);
   Array.from(computeBreakdown(txs,ev,'artist').entries()).sort((a,b)=>b[1].amount-a[1].amount).forEach(([key,r])=>{
-    const share=expenseShares.get(key)||0;
-    rows.push([r.label,r.qty,r.amount,share,r.amount-share]);
+    const bd=expBreakdown.get(key)||{commonShare:0,owedOut:0,owedIn:0};
+    rows.push([r.label,r.qty,r.amount,bd.commonShare,bd.owedOut,bd.owedIn,r.amount-bd.commonShare-bd.owedOut+bd.owedIn]);
   });
   rows.push([]);
   function appendBreakdown(title,mode,withSub){
@@ -1897,7 +1988,12 @@ function migrateEvent(ev){
     }
     if(p.tagId===undefined) p.tagId=null;
   });
-  ev.expenses.forEach(x=>{ if(!x.splitArtistIds) x.splitArtistIds=[]; });
+  ev.expenses.forEach(x=>{
+    if(!x.splitArtistIds) x.splitArtistIds=[];
+    if(!x.type) x.type='common';
+    if(x.fromArtistId===undefined) x.fromArtistId=null;
+    if(x.toArtistId===undefined) x.toArtistId=null;
+  });
 }
 async function init(){
   try{
