@@ -240,6 +240,38 @@ table.records tbody tr:hover{background:var(--surface-alt);}
 .img-pick .preview{width:64px;height:64px;border-radius:var(--radius-sm);background:var(--surface-alt);background-size:cover;background-position:center;flex:none;transition:opacity .15s;}
 .img-pick .preview.loading{opacity:.4;}
 .settings-subnav{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;}
+
+/* room screen */
+.room-screen{min-height:100%;display:flex;align-items:center;justify-content:center;padding:40px 20px;}
+.room-card{width:100%;max-width:380px;}
+.room-card h1{font-size:22px;font-weight:800;margin:0 0 4px;color:var(--ink);}
+.room-card .subtitle{font-size:14px;color:var(--muted);margin:0 0 28px;}
+.room-divider{display:flex;align-items:center;gap:10px;margin:20px 0;}
+.room-divider span{color:var(--muted);font-size:12px;font-weight:600;white-space:nowrap;}
+.room-divider::before,.room-divider::after{content:'';flex:1;height:1px;background:var(--border);}
+.room-code-display{
+  font-size:38px;font-weight:800;letter-spacing:10px;color:var(--accent);
+  background:var(--accent-soft);border-radius:var(--radius-md);
+  padding:22px;text-align:center;margin:14px 0;cursor:pointer;
+  border:2px dashed var(--accent);
+}
+.room-badge{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--accent-soft);color:var(--accent);
+  border-radius:999px;padding:4px 10px 4px 8px;font-size:12px;font-weight:700;
+  border:1px solid var(--accent);cursor:pointer;
+}
+.room-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--success);flex:none;}
+
+/* transaction grouping */
+.tx-row{cursor:pointer;}
+.tx-row:active,.tx-row:hover{background:var(--surface-alt);}
+.tx-items-inner{padding:6px 8px 6px 36px;background:var(--surface-alt);}
+.tx-item-detail{display:flex;gap:8px;align-items:center;padding:5px 0;font-size:12.5px;border-bottom:1px solid var(--border);}
+.tx-item-detail:last-child{border-bottom:none;}
+.tx-item-detail .ti-name{flex:1;font-weight:600;min-width:0;}
+.tx-item-detail .ti-meta{color:var(--muted);}
+.tx-chevron{font-size:10px;color:var(--muted);transition:transform .15s;display:inline-block;}
 .sort-bar{display:flex;align-items:center;gap:6px;margin-bottom:14px;flex-wrap:wrap;}
 .sort-bar-label{font-size:12px;font-weight:700;color:var(--muted);white-space:nowrap;padding-right:2px;}
 .sort-chip{border:1px solid var(--border);background:transparent;color:var(--muted);padding:4px 12px;border-radius:999px;font-size:12px;font-weight:600;}
@@ -273,52 +305,109 @@ table.records tbody tr:hover{background:var(--surface-alt);}
 <div class="toast-wrap" id="toastRoot"></div>
 
 <script>
-/* ============ DB layer ============ */
-const DB_NAME='subkiosk-db', DB_VERSION=1;
-let db;
-function openDB(){
+/* ============ Firestore REST API (SDK-free) ============ */
+const _FS='https://firestore.googleapis.com/v1/projects/settlementssc/databases/(default)/documents';
+const _KEY='AIzaSyCf4mPxR6BItglbtLesw8RpU6sJfxia8lM';
+let _pollTimer=null,_lastSnap='';
+
+/* JS <-> Firestore 타입 변환 */
+function _j2f(v){
+  if(v===null||v===undefined)return{nullValue:null};
+  if(typeof v==='boolean')return{booleanValue:v};
+  if(typeof v==='number')return Number.isInteger(v)?{integerValue:String(v)}:{doubleValue:v};
+  if(typeof v==='string')return{stringValue:v};
+  if(Array.isArray(v))return{arrayValue:{values:v.map(_j2f)}};
+  if(typeof v==='object'){const f={};for(const[k,val]of Object.entries(v))f[k]=_j2f(val);return{mapValue:{fields:f}};}
+  return{stringValue:String(v)};
+}
+function _f2j(f){
+  if(!f)return null;
+  if('nullValue'in f)return null;
+  if('booleanValue'in f)return f.booleanValue;
+  if('integerValue'in f)return Number(f.integerValue);
+  if('doubleValue'in f)return f.doubleValue;
+  if('stringValue'in f)return f.stringValue;
+  if('arrayValue'in f)return(f.arrayValue.values||[]).map(_f2j);
+  if('mapValue'in f){const o={};for(const[k,v]of Object.entries(f.mapValue.fields||{}))o[k]=_f2j(v);return o;}
+  return null;
+}
+
+/* REST 기본 함수 */
+async function _fsGet(path){
+  const r=await fetch(_FS+'/'+path+'?key='+_KEY);
+  if(r.status===404)return null;
+  if(!r.ok)throw new Error('Firestore GET '+r.status+' '+path);
+  const d=await r.json();
+  return d.fields?_f2j({mapValue:{fields:d.fields}}):null;
+}
+async function _fsSet(path,obj){
+  const w=_j2f(obj);
+  const fields=w.mapValue?w.mapValue.fields:{};
+  const r=await fetch(_FS+'/'+path+'?key='+_KEY,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({fields})});
+  if(!r.ok)throw new Error('Firestore SET '+r.status+' '+path);
+}
+async function _fsDel(path){
+  const r=await fetch(_FS+'/'+path+'?key='+_KEY,{method:'DELETE'});
+  if(!r.ok&&r.status!==404)throw new Error('Firestore DEL '+r.status);
+}
+async function _fsList(path){
+  const r=await fetch(_FS+'/'+path+'?key='+_KEY);
+  if(r.status===404)return[];
+  if(!r.ok)throw new Error('Firestore LIST '+r.status+' '+path);
+  const d=await r.json();
+  return(d.documents||[]).map(doc=>doc.fields?_f2j({mapValue:{fields:doc.fields}}):null).filter(Boolean);
+}
+
+/* 도메인 헬퍼 */
+async function fsGetEvents(){return _fsList('rooms/'+state.roomCode+'/events');}
+async function fsSaveEvent(ev){await _fsSet('rooms/'+state.roomCode+'/events/'+ev.id,JSON.parse(JSON.stringify(ev)));}
+async function fsDeleteEvent(id){await _fsDel('rooms/'+state.roomCode+'/events/'+id);}
+async function fsSaveImage(id,b64){await _fsSet('rooms/'+state.roomCode+'/images/'+id,{data:b64});}
+async function fsGetImage(id){const d=await _fsGet('rooms/'+state.roomCode+'/images/'+id);return d?d.data:null;}
+async function fsRoomExists(code){return(await _fsGet('rooms/'+code))!==null;}
+async function fsCreateRoom(code){await _fsSet('rooms/'+code,{createdAt:new Date().toISOString()});}
+
+/* ============ IndexedDB (이미지 로컬 캐시) ============ */
+const IDB_NAME='subkiosk-imgcache',IDB_VERSION=1;
+let idb=null;
+function openIDB(){
   return new Promise((resolve,reject)=>{
-    const req=indexedDB.open(DB_NAME,DB_VERSION);
+    const req=indexedDB.open(IDB_NAME,IDB_VERSION);
     req.onupgradeneeded=(e)=>{
       const d=e.target.result;
-      if(!d.objectStoreNames.contains('events')) d.createObjectStore('events',{keyPath:'id'});
       if(!d.objectStoreNames.contains('images')) d.createObjectStore('images',{keyPath:'id'});
     };
-    req.onsuccess=(e)=>{db=e.target.result;resolve(db);};
+    req.onsuccess=(e)=>{idb=e.target.result;resolve(idb);};
     req.onerror=(e)=>reject(e);
   });
 }
-function dbGetAll(store){
-  return new Promise((resolve,reject)=>{
-    const tx=db.transaction(store,'readonly');
-    const req=tx.objectStore(store).getAll();
-    req.onsuccess=()=>resolve(req.result);
-    req.onerror=()=>reject(req.error);
+function idbGet(id){
+  return new Promise((resolve)=>{
+    if(!idb){resolve(null);return;}
+    const tx=idb.transaction('images','readonly');
+    const req=tx.objectStore('images').get(id);
+    req.onsuccess=()=>resolve(req.result||null);
+    req.onerror=()=>resolve(null);
   });
 }
-function dbPut(store,value){
-  return new Promise((resolve,reject)=>{
-    const tx=db.transaction(store,'readwrite');
-    tx.objectStore(store).put(value);
-    tx.oncomplete=()=>resolve(value);
-    tx.onerror=()=>reject(tx.error);
-  });
-}
-function dbDelete(store,id){
-  return new Promise((resolve,reject)=>{
-    const tx=db.transaction(store,'readwrite');
-    tx.objectStore(store).delete(id);
+function idbPut(rec){
+  return new Promise((resolve)=>{
+    if(!idb){resolve();return;}
+    const tx=idb.transaction('images','readwrite');
+    tx.objectStore('images').put(rec);
     tx.oncomplete=()=>resolve();
-    tx.onerror=()=>reject(tx.error);
+    tx.onerror=()=>resolve();
   });
 }
-function dbGet(store,id){
-  return new Promise((resolve,reject)=>{
-    const tx=db.transaction(store,'readonly');
-    const req=tx.objectStore(store).get(id);
-    req.onsuccess=()=>resolve(req.result);
-    req.onerror=()=>reject(req.error);
-  });
+
+
+
+/* Legacy stubs */
+async function dbDelete(store,id){
+  if(store==='events') await fsDeleteEvent(id);
+}
+async function dbPut(store,value){
+  if(store==='images') await idbPut(value);
 }
 
 /* ============ utils ============ */
@@ -400,15 +489,40 @@ function toast(msg){
   setTimeout(()=>el.remove(),1600);
 }
 
+function blobToBase64(blob){
+  return new Promise((resolve,reject)=>{
+    const r=new FileReader();
+    r.onload=()=>resolve(r.result);
+    r.onerror=reject;
+    r.readAsDataURL(blob);
+  });
+}
+
 let imageUrlCache=new Map();
 async function getImageUrl(imageId){
   if(!imageId) return null;
   if(imageUrlCache.has(imageId)) return imageUrlCache.get(imageId);
-  const rec=await dbGet('images',imageId);
-  if(!rec) return null;
-  const url=URL.createObjectURL(rec.blob);
-  imageUrlCache.set(imageId,url);
-  return url;
+  // 1) 로컬 IndexedDB 캐시
+  try{
+    const rec=await idbGet(imageId);
+    if(rec&&rec.blob){
+      const url=URL.createObjectURL(rec.blob);
+      imageUrlCache.set(imageId,url);
+      return url;
+    }
+  }catch(e){}
+  // 2) Firestore에서 가져오기
+  if(!state||!state.roomCode) return null;
+  try{
+    const base64=await fsGetImage(imageId);
+    if(base64){
+      imageUrlCache.set(imageId,base64);
+      // 로컬에 캐시
+      fetch(base64).then(r=>r.blob()).then(blob=>idbPut({id:imageId,blob})).catch(()=>{});
+      return base64;
+    }
+  }catch(e){}
+  return null;
 }
 function fillImageBackgrounds(containerSelector){
   const els=document.querySelectorAll(containerSelector+' [data-img]');
@@ -422,6 +536,8 @@ function fillImageBackgrounds(containerSelector){
 
 /* ============ state ============ */
 const state={
+  roomCode:null,
+  syncingFromLocal:false,
   events:[],
   currentEventId:null,
   currentTab:'sales',
@@ -433,12 +549,17 @@ const state={
   recordsFilters:{sessionId:'',artistId:'',tagId:'',q:''},
   settlementSessionId:'',
   settlementMode:'artist',
-  settingsSortOrders:{sessions:'created',artists:'name',tags:'name',products:'name'}
+  settingsSortOrders:{sessions:'created',artists:'name',tags:'name',products:'name'},
+  expandedTxIds:new Set()
 };
 function currentEvent(){return state.events.find(e=>e.id===state.currentEventId)||null;}
 async function saveEvent(){
   const ev=currentEvent();
-  if(ev) await dbPut('events',ev);
+  if(!ev||!state.roomCode) return;
+  state.syncingFromLocal=true;
+  try{ await fsSaveEvent(ev); }finally{
+    setTimeout(()=>{state.syncingFromLocal=false;},400);
+  }
 }
 const ARTIST_COLORS=['#FF5C8A','#19B3A6','#E6A23C','#7C5CFF','#3DA5F5','#E5484D','#2BB673','#B47CFF'];
 
@@ -450,7 +571,7 @@ document.addEventListener('click',(e)=>{
   const el=e.target.closest('[data-action]');
   if(!el) return;
   const fn=handlers[el.dataset.action];
-  if(fn) fn(el,e);
+  if(fn){ e.stopPropagation(); fn(el,e); }
 });
 document.addEventListener('change',(e)=>{
   const el=e.target.closest('[data-change]');
@@ -526,21 +647,120 @@ const TABS=[
   {id:'settings',label:'설정'}
 ];
 
+/* -------- room screen -------- */
+function renderRoomScreen(){
+  document.getElementById('eventSwitcher').innerHTML='';
+  document.getElementById('mainTabs').innerHTML='';
+  document.getElementById('mainContent').innerHTML=
+    '<div class="room-screen">'+
+    '<div class="room-card">'+
+      '<h1>행사 정산</h1>'+
+      '<p class="subtitle">팀원들과 함께 쓰려면 방을 만들거나 코드로 입장하세요.</p>'+
+      '<button class="btn btn-primary btn-lg btn-block" data-action="createRoom">새 방 만들기</button>'+
+      '<div class="room-divider"><span>또는</span></div>'+
+      '<div class="field" style="margin-bottom:8px;">'+
+        '<label>방 코드 입장</label>'+
+        '<input class="input" id="f_roomcode" maxlength="6" placeholder="6자리 코드" style="text-transform:uppercase;letter-spacing:4px;font-size:18px;">'+
+      '</div>'+
+      '<button class="btn btn-block" data-action="joinRoom" style="justify-content:center;">입장</button>'+
+    '</div>'+
+    '</div>';
+}
+
+onAction('createRoom',async()=>{
+  const btn=document.querySelector('[data-action="createRoom"]');
+  if(btn) btn.disabled=true;
+  try{
+    const code=Array.from({length:6},()=>'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random()*32)]).join('');
+    await fsCreateRoom(code);
+    localStorage.setItem('ssc_room',code);
+    state.roomCode=code;
+    await enterRoom(code);
+  }catch(err){
+    toast('방 생성 실패: '+(err&&err.message?err.message:String(err)));
+    if(btn) btn.disabled=false;
+  }
+});
+
+onAction('joinRoom',async()=>{
+  const code=(document.getElementById('f_roomcode').value||'').trim().toUpperCase();
+  if(code.length!==6){toast('6자리 코드를 입력해주세요');return;}
+  const btn=document.querySelector('[data-action="joinRoom"]');
+  if(btn) btn.disabled=true;
+  try{
+    const exists=await fsRoomExists(code);
+    if(!exists){toast('존재하지 않는 방이에요');if(btn) btn.disabled=false;return;}
+    localStorage.setItem('ssc_room',code);
+    state.roomCode=code;
+    await enterRoom(code);
+  }catch(err){
+    toast('입장 실패: '+(err&&err.message?err.message:String(err)));
+    if(btn) btn.disabled=false;
+  }
+});
+
+async function enterRoom(code){
+  state.roomCode=code;
+  const events=await fsGetEvents();
+  events.forEach(migrateEvent);
+  state.events=events;
+  if(state.events.length>0) state.currentEventId=state.events[0].id;
+  attachRoomListener(code);
+  renderApp();
+}
+
+function attachRoomListener(code){
+  if(_pollTimer) clearInterval(_pollTimer);
+  _lastSnap='';
+  _pollTimer=setInterval(async()=>{
+    if(state.syncingFromLocal||!state.roomCode) return;
+    const modal=document.getElementById('modalRoot');
+    if(modal&&!modal.classList.contains('hidden')) return;
+    try{
+      const events=await fsGetEvents();
+      const snap=events.map(e=>e.id+':'+(e.transactions||[]).length+':'+(e.products||[]).length).join('|');
+      if(snap===_lastSnap) return;
+      _lastSnap=snap;
+      events.forEach(migrateEvent);
+      state.events=events;
+      if(!state.currentEventId&&state.events.length>0) state.currentEventId=state.events[0].id;
+      renderApp();
+    }catch(e){}
+  },5000);
+}
+
+onAction('leaveRoom',()=>{
+  confirmAction('방에서 나가면 이 기기에서 데이터 접근이 끊겨요. 나가시겠어요?',()=>{
+    localStorage.removeItem('ssc_room');
+    if(_pollTimer){clearInterval(_pollTimer);_pollTimer=null;}
+    state.roomCode=null;
+    state.events=[];
+    state.currentEventId=null;
+    imageUrlCache.clear();
+    renderRoomScreen();
+  },'나가기');
+});
+
+/* -------- app shell -------- */
 function renderApp(){
+  if(!state.roomCode){renderRoomScreen();return;}
   const switcher=document.getElementById('eventSwitcher');
   const tabsNav=document.getElementById('mainTabs');
   const main=document.getElementById('mainContent');
 
+  const roomBadge='<span class="room-badge" data-action="copyRoomCode" title="클릭하면 복사">'+
+    '<span class="dot"></span>'+state.roomCode+'</span>';
+
   if(state.events.length===0){
-    switcher.innerHTML='';
+    switcher.innerHTML=roomBadge;
     tabsNav.innerHTML='';
     main.innerHTML=renderOnboarding();
     return;
   }
-  if(!currentEvent()){
-    state.currentEventId=state.events[0].id;
-  }
+  if(!currentEvent()) state.currentEventId=state.events[0].id;
+
   switcher.innerHTML=
+    roomBadge+
     '<select data-change="switchEvent">'+
       state.events.map(ev=>'<option value="'+ev.id+'" '+(ev.id===state.currentEventId?'selected':'')+'>'+escapeHTML(ev.name)+'</option>').join('')+
     '</select>'+
@@ -551,6 +771,11 @@ function renderApp(){
 
   renderTab();
 }
+
+onAction('copyRoomCode',()=>{
+  navigator.clipboard&&navigator.clipboard.writeText(state.roomCode).then(()=>toast('방 코드 복사됨: '+state.roomCode));
+});
+
 
 function renderTab(){
   const main=document.getElementById('mainContent');
@@ -599,7 +824,7 @@ onAction('saveNewEvent',async()=>{
   const ev={id:uid(),name,memo:'',createdAt:nowISO(),sessions:[],artists:[],tags:[],products:[],transactions:[],expenses:[]};
   state.events.push(ev);
   state.currentEventId=ev.id;
-  await dbPut('events',ev);
+  await fsSaveEvent(ev);
   closeModal();
   renderApp();
   toast('행사를 만들었어요');
@@ -622,7 +847,7 @@ onAction('saveEventName',async(el)=>{
   const ev=state.events.find(e=>e.id===id);
   if(!ev) return;
   ev.name=document.getElementById('f_evname2').value.trim()||ev.name;
-  await dbPut('events',ev);
+  await fsSaveEvent(ev);
   closeModal();renderApp();
 });
 onAction('deleteEvent',(el)=>{
@@ -676,7 +901,14 @@ onAction('setSettingsSort',(el)=>{
 
 /* ---- events management ---- */
 function renderEventsList(){
-  return '<div style="display:flex;justify-content:flex-end;margin-bottom:12px;"><button class="btn btn-accent" data-action="newEvent">+ 새 행사</button></div>'+
+  return '<div class="card" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">'+
+      '<div>'+
+        '<div style="font-size:13px;color:var(--muted);font-weight:600;margin-bottom:2px;">현재 방 코드</div>'+
+        '<div style="font-size:26px;font-weight:800;letter-spacing:6px;color:var(--accent);">'+escapeHTML(state.roomCode)+'</div>'+
+      '</div>'+
+      '<button class="btn btn-danger" data-action="leaveRoom">방 나가기</button>'+
+    '</div>'+
+    '<div style="display:flex;justify-content:flex-end;margin-bottom:12px;"><button class="btn btn-accent" data-action="newEvent">+ 새 행사</button></div>'+
     '<div class="list">'+
     state.events.map(ev=>{
       const totalSales=ev.transactions.reduce((s,t)=>s+t.total,0);
@@ -1054,16 +1286,23 @@ onAction('newProduct',()=>{
       '<button class="btn btn-primary" data-action="saveNewProduct">추가</button>'+
     '</div>');
 });
+async function saveImageBlob(blob){
+  const imageId=uid();
+  try{
+    const base64=await blobToBase64(blob);
+    await fsSaveImage(imageId,base64);
+    await idbPut({id:imageId,blob});
+    imageUrlCache.set(imageId,base64);
+  }catch(e){ console.error('이미지 저장 실패',e); }
+  return imageId;
+}
 onAction('saveNewProduct',async()=>{
   const detailName=document.getElementById('f_detail').value.trim();
   const price=Number(document.getElementById('f_price').value)||0;
   if(!detailName){toast('세부품목명을 입력해주세요');return;}
   try{
     let imageId=null;
-    if(pendingImageBlob){
-      imageId=uid();
-      await dbPut('images',{id:imageId,blob:pendingImageBlob});
-    }
+    if(pendingImageBlob) imageId=await saveImageBlob(pendingImageBlob);
     const ev=currentEvent();
     ev.products.push({
       id:uid(),detailName,
@@ -1072,7 +1311,7 @@ onAction('saveNewProduct',async()=>{
     });
     await saveEvent();closeModal();renderTab();toast('상품을 추가했어요');
   }catch(err){
-    toast('저장 중 오류가 발생했어요: '+(err&&err.message?err.message:String(err)));
+    toast('저장 중 오류: '+(err&&err.message?err.message:String(err)));
   }
 });
 onAction('editProduct',(el)=>{
@@ -1099,13 +1338,10 @@ onAction('saveEditProduct',async(el)=>{
     p.artistId=document.getElementById('f_artist').value||null;
     p.price=Number(document.getElementById('f_price').value)||0;
     p.tagId=document.getElementById('f_tag').value||null;
-    if(pendingImageBlob){
-      p.imageId=uid();
-      await dbPut('images',{id:p.imageId,blob:pendingImageBlob});
-    }
+    if(pendingImageBlob) p.imageId=await saveImageBlob(pendingImageBlob);
     await saveEvent();closeModal();renderTab();
   }catch(err){
-    toast('저장 중 오류가 발생했어요: '+(err&&err.message?err.message:String(err)));
+    toast('저장 중 오류: '+(err&&err.message?err.message:String(err)));
   }
 });
 onAction('deleteProductConfirmed',(el)=>{
@@ -1252,6 +1488,7 @@ onAction('checkout',async(el)=>{
 </script>
 <script>
 /* ============ records tab ============ */
+/* flattenTransactions는 CSV 내보내기에서 여전히 사용 */
 function flattenTransactions(ev){
   const rows=[];
   ev.transactions.forEach(t=>{
@@ -1273,12 +1510,56 @@ function flattenTransactions(ev){
 function renderRecordsTab(){
   const ev=currentEvent();
   const f=state.recordsFilters;
-  let rows=flattenTransactions(ev);
-  if(f.sessionId) rows=rows.filter(r=>r.sessionId===f.sessionId);
-  if(f.artistId) rows=rows.filter(r=>r.artistId===f.artistId);
-  if(f.tagId) rows=rows.filter(r=>r.tagId===f.tagId);
-  if(f.q) rows=rows.filter(r=>(r.detailName||'').toLowerCase().includes(f.q.toLowerCase()));
-  const total=rows.reduce((s,r)=>s+r.subtotal,0);
+  // 거래 단위로 필터링
+  let txs=ev.transactions.slice().sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp));
+  if(f.sessionId) txs=txs.filter(t=>t.sessionId===f.sessionId);
+  if(f.artistId) txs=txs.filter(t=>t.items.some(i=>i.artistId===f.artistId));
+  if(f.tagId) txs=txs.filter(t=>t.items.some(i=>{const p=ev.products.find(x=>x.id===i.productId);return p&&p.tagId===f.tagId;}));
+  if(f.q) txs=txs.filter(t=>t.items.some(i=>(i.detailName||'').toLowerCase().includes(f.q.toLowerCase())));
+  const total=txs.reduce((s,t)=>s+t.total,0);
+  const totalItems=txs.reduce((s,t)=>s+t.items.reduce((ss,i)=>ss+i.qty,0),0);
+
+  function txRowsHTML(t){
+    const session=ev.sessions.find(s=>s.id===t.sessionId);
+    const expanded=state.expandedTxIds.has(t.id);
+    // 요약: 첫 번째 상품명 + 나머지 개수
+    const firstItem=t.items[0];
+    const moreCount=t.items.length-1;
+    const summary=escapeHTML(firstItem?firstItem.detailName||'-':'')+(moreCount>0?' <span style="color:var(--muted);">외 '+moreCount+'개</span>':'');
+    const artists=[...new Set(t.items.map(i=>i.artistName||'미지정'))].join(', ');
+    const row=
+      '<tr class="tx-row" data-action="toggleTx" data-id="'+t.id+'">'+
+        '<td><span class="tx-chevron">'+(expanded?'▼':'▶')+'</span></td>'+
+        '<td>'+fmtDateTime(t.timestamp)+'</td>'+
+        '<td>'+escapeHTML(session?session.label:'(삭제된 세션)')+'</td>'+
+        '<td>'+escapeHTML(artists)+'</td>'+
+        '<td>'+summary+'</td>'+
+        '<td><span class="badge '+(t.paymentMethod==='cash'?'badge-cash':'badge-transfer')+'">'+(t.paymentMethod==='cash'?'현금':'이체')+'</span></td>'+
+        '<td style="font-weight:700;">'+won(t.total)+'</td>'+
+        '<td><button class="btn btn-ghost" data-action="deleteTx" data-id="'+t.id+'">삭제</button></td>'+
+      '</tr>';
+    if(!expanded) return row;
+    // 펼침: 상품별 상세
+    const detail=
+      '<tr><td colspan="8" style="padding:0;border-bottom:1px solid var(--border);">'+
+        '<div class="tx-items-inner">'+
+          t.items.map(it=>{
+            const product=ev.products.find(p=>p.id===it.productId);
+            const tag=product&&product.tagId?ev.tags.find(x=>x.id===product.tagId):null;
+            return '<div class="tx-item-detail">'+
+              '<span class="ti-name">'+escapeHTML(it.detailName||'-')+'</span>'+
+              '<span class="ti-meta">'+escapeHTML(it.artistName||'미지정')+'</span>'+
+              (tag?'<span class="ti-meta">'+escapeHTML(tag.name)+'</span>':'')+
+              '<span class="ti-meta">'+it.qty+'개</span>'+
+              '<span class="ti-meta">'+won(it.unitPrice)+'</span>'+
+              '<span style="font-weight:700;font-size:12.5px;">'+won(it.subtotal)+'</span>'+
+            '</div>';
+          }).join('')+
+        '</div>'+
+      '</td></tr>';
+    return row+detail;
+  }
+
   return '<div class="row" style="flex-wrap:wrap;">'+
       '<div class="field" style="min-width:140px;"><label>세션</label>'+
         '<select class="select" data-change="recFilterSession"><option value="">전체</option>'+
@@ -1292,39 +1573,32 @@ function renderRecordsTab(){
         '<select class="select" data-change="recFilterTag"><option value="">전체</option>'+
         ev.tags.map(t=>'<option value="'+t.id+'" '+(f.tagId===t.id?'selected':'')+'>'+escapeHTML(t.name)+'</option>').join('')+
         '</select></div>'+
-      '<div class="field" style="min-width:140px;"><label>세부품목 검색</label>'+
-        '<input class="input" id="recSearch" data-livechange="recFilterQ" value="'+escapeHTML(f.q)+'" placeholder="검색"></div>'+
+      '<div class="field" style="min-width:140px;"><label>검색</label>'+
+        '<input class="input" id="recSearch" data-livechange="recFilterQ" value="'+escapeHTML(f.q)+'" placeholder="세부품목명"></div>'+
     '</div>'+
     '<div class="card" style="overflow:auto;padding:0;">'+
-      (rows.length===0?'<div class="empty" style="padding:40px 0;"><h3>기록이 없어요</h3><p>조건에 맞는 판매 기록이 없어요.</p></div>':
-      '<table class="records"><thead><tr><th>시간</th><th>세션</th><th>작가</th><th>세부품목</th><th>태그</th><th>수량</th><th>단가</th><th>합계</th><th>결제</th><th></th></tr></thead><tbody>'+
-        rows.map(r=>
-          '<tr>'+
-            '<td>'+fmtDateTime(r.ts)+'</td>'+
-            '<td>'+escapeHTML(r.sessionLabel)+'</td>'+
-            '<td>'+escapeHTML(r.artistName)+'</td>'+
-            '<td>'+escapeHTML(r.detailName||'-')+'</td>'+
-            '<td>'+escapeHTML(r.tagName||'-')+'</td>'+
-            '<td>'+r.qty+'</td>'+
-            '<td>'+won(r.unitPrice)+'</td>'+
-            '<td>'+won(r.subtotal)+'</td>'+
-            '<td><span class="badge '+(r.method==='cash'?'badge-cash':'badge-transfer')+'">'+(r.method==='cash'?'현금':'이체')+'</span></td>'+
-            '<td><button class="btn btn-ghost" data-action="deleteTx" data-id="'+r.txId+'">삭제</button></td>'+
-          '</tr>'
-        ).join('')+
+      (txs.length===0?'<div class="empty" style="padding:40px 0;"><h3>기록이 없어요</h3><p>조건에 맞는 판매 기록이 없어요.</p></div>':
+      '<table class="records"><thead><tr><th></th><th>시간</th><th>세션</th><th>작가</th><th>내역</th><th>결제</th><th>합계</th><th></th></tr></thead><tbody>'+
+        txs.map(t=>txRowsHTML(t)).join('')+
       '</tbody></table>')+
     '</div>'+
-    '<div style="margin-top:12px;padding:0 4px;font-size:14px;color:var(--muted);">총 '+rows.length+'건 · 합계 <strong style="color:var(--ink);">'+won(total)+'</strong></div>';
+    '<div style="margin-top:12px;padding:0 4px;font-size:14px;color:var(--muted);">'+txs.length+'건 · '+totalItems+'개 판매 · 합계 <strong style="color:var(--ink);">'+won(total)+'</strong></div>';
 }
 handlers.recFilterSession=(el)=>{state.recordsFilters.sessionId=el.value;renderTab();};
 handlers.recFilterArtist=(el)=>{state.recordsFilters.artistId=el.value;renderTab();};
 handlers.recFilterTag=(el)=>{state.recordsFilters.tagId=el.value;renderTab();};
 handlers.recFilterQ=(el)=>{state.recordsFilters.q=el.value;renderTabPreserveFocus();};
+onAction('toggleTx',(el)=>{
+  const id=el.dataset.id;
+  if(state.expandedTxIds.has(id)) state.expandedTxIds.delete(id); else state.expandedTxIds.add(id);
+  renderTab();
+});
 onAction('deleteTx',(el)=>{
   const id=el.dataset.id;
   confirmAction('이 거래를 삭제할까요? 포함된 모든 상품 내역이 함께 삭제돼요.',async()=>{
     const ev=currentEvent();
     ev.transactions=ev.transactions.filter(t=>t.id!==id);
+    state.expandedTxIds.delete(id);
     await saveEvent();renderTab();
     toast('거래를 삭제했어요');
   });
@@ -1627,17 +1901,26 @@ function migrateEvent(ev){
 }
 async function init(){
   try{
-    await openDB();
-    state.events=await dbGetAll('events');
-    state.events.forEach(migrateEvent);
-    if(state.events.length>0){
-      await Promise.all(state.events.map(ev=>dbPut('events',ev)));
-      state.currentEventId=state.events[0].id;
+    await openIDB().catch(()=>{});
+    const saved=localStorage.getItem('ssc_room');
+    if(saved){
+      try{
+        const exists=await fsRoomExists(saved);
+        if(exists){
+          state.roomCode=saved;
+          await enterRoom(saved);
+          return;
+        }else{
+          localStorage.removeItem('ssc_room');
+        }
+      }catch(e){
+        localStorage.removeItem('ssc_room');
+      }
     }
-    renderApp();
+    renderRoomScreen();
   }catch(err){
     document.getElementById('mainContent').innerHTML=
-      '<div class="empty"><h3>저장소를 열 수 없어요</h3><p>'+escapeHTML(err&&err.message?err.message:String(err))+'</p></div>';
+      '<div class="empty"><h3>시작할 수 없어요</h3><p>'+escapeHTML(err&&err.message?err.message:String(err))+'</p></div>';
   }
 }
 window.addEventListener('DOMContentLoaded',init);
