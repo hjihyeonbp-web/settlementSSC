@@ -365,7 +365,44 @@ async function fsDeleteEvent(id){await _fsDel('rooms/'+state.roomCode+'/events/'
 async function fsSaveImage(id,b64){await _fsSet('rooms/'+state.roomCode+'/images/'+id,{data:b64});}
 async function fsGetImage(id){const d=await _fsGet('rooms/'+state.roomCode+'/images/'+id);return d?d.data:null;}
 async function fsRoomExists(code){return(await _fsGet('rooms/'+code))!==null;}
-async function fsCreateRoom(code){await _fsSet('rooms/'+code,{createdAt:new Date().toISOString()});}
+async function fsCreateRoom(code){await _fsSet('rooms/'+code,{createdAt:new Date().toISOString(),ownerId:getDeviceId()});}
+async function fsGetRoom(code){return _fsGet('rooms/'+code);}
+
+/* 방/멤버 관리 */
+async function fsListMembers(code){return _fsList('rooms/'+code+'/members');}
+async function fsHeartbeat(code){
+  const id=getDeviceId();
+  await _fsSet('rooms/'+code+'/members/'+id,{
+    deviceId:id,
+    name:localStorage.getItem('ssc_name')||'',
+    joinedAt:state.myJoinedAt||new Date().toISOString(),
+    lastSeen:new Date().toISOString()
+  });
+}
+async function fsJoinRoom(code){ state.myJoinedAt=state.myJoinedAt||new Date().toISOString(); await fsHeartbeat(code); }
+async function fsLeaveMember(code){await _fsDel('rooms/'+code+'/members/'+getDeviceId());}
+async function fsKickMember(code,deviceId){await _fsDel('rooms/'+code+'/members/'+deviceId);}
+async function fsSetOwner(code,createdAt,ownerId){await _fsSet('rooms/'+code,{createdAt:createdAt||new Date().toISOString(),ownerId});}
+
+/* 문서 이름까지 포함해 목록 조회 (하위 컬렉션 통째 삭제용) */
+async function _fsListRaw(path){
+  const r=await fetch(_FS+'/'+path+'?key='+_KEY);
+  if(r.status===404)return[];
+  if(!r.ok)throw new Error('Firestore LIST '+r.status+' '+path);
+  const d=await r.json();
+  return (d.documents||[]).map(doc=>({name:doc.name,fields:doc.fields}));
+}
+function _docId(name){return String(name||'').split('/').pop();}
+async function fsDeleteRoomDeep(code){
+  const base='rooms/'+code;
+  for(const sub of ['events','images','members']){
+    let docs=[]; try{ docs=await _fsListRaw(base+'/'+sub); }catch(e){ docs=[]; }
+    for(const d of docs){ try{ await _fsDel(base+'/'+sub+'/'+_docId(d.name)); }catch(e){} }
+  }
+  try{ await _fsDel(base); }catch(e){}
+}
+const STALE_MS=60000; // 하트비트가 이 시간 넘게 끊기면 이탈로 간주
+function isStaleMember(m){ return !m||!m.lastSeen||(Date.now()-new Date(m.lastSeen).getTime())>STALE_MS; }
 
 /* ============ IndexedDB (이미지 로컬 캐시) ============ */
 const IDB_NAME='subkiosk-imgcache',IDB_VERSION=1;
@@ -414,6 +451,11 @@ async function dbPut(store,value){
 function uid(){
   if(window.crypto && crypto.randomUUID) return crypto.randomUUID();
   return 'id-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10);
+}
+function getDeviceId(){
+  let id=localStorage.getItem('ssc_device');
+  if(!id){ id=uid(); localStorage.setItem('ssc_device',id); }
+  return id;
 }
 function won(n){
   const r=Math.round(n||0);
@@ -537,6 +579,11 @@ function fillImageBackgrounds(containerSelector){
 /* ============ state ============ */
 const state={
   roomCode:null,
+  deviceId:null,
+  roomOwnerId:null,
+  isHost:false,
+  members:[],
+  myJoinedAt:null,
   syncingFromLocal:false,
   events:[],
   currentEventId:null,
@@ -607,6 +654,7 @@ function closeModal(){
   document.getElementById('modalRoot').classList.add('hidden');
   document.getElementById('modalRoot').innerHTML='';
   pendingConfirmCallback=null;
+  pendingCashConfirm=null;
 }
 function openModal(html){
   const root=document.getElementById('modalRoot');
@@ -619,14 +667,17 @@ document.getElementById('modalRoot').addEventListener('click',(e)=>{
 });
 
 let pendingConfirmCallback=null;
-function confirmAction(message,onConfirm,confirmLabel){
+function confirmAction(message,onConfirm,confirmLabel,accent){
   pendingConfirmCallback=onConfirm;
+  const btnStyle=accent
+    ?'background:var(--accent);color:#fff;border-color:var(--accent);'
+    :'background:var(--danger);color:#fff;border-color:var(--danger);';
   openModal(
     '<h3>확인해주세요</h3>'+
     '<p style="color:var(--muted);font-size:14px;line-height:1.5;margin:0;">'+escapeHTML(message)+'</p>'+
     '<div class="modal-actions">'+
       '<button class="btn" data-action="closeModal">아니요</button>'+
-      '<button class="btn" style="background:var(--danger);color:#fff;border-color:var(--danger);" data-action="confirmYes">'+(confirmLabel||'삭제')+'</button>'+
+      '<button class="btn" style="'+btnStyle+'" data-action="confirmYes">'+(confirmLabel||'삭제')+'</button>'+
     '</div>'
   );
 }
@@ -667,19 +718,22 @@ function renderRoomScreen(){
     '</div>';
 }
 
-onAction('createRoom',async()=>{
-  const btn=document.querySelector('[data-action="createRoom"]');
-  if(btn) btn.disabled=true;
-  try{
-    const code=Array.from({length:6},()=>'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random()*32)]).join('');
-    await fsCreateRoom(code);
-    localStorage.setItem('ssc_room',code);
-    state.roomCode=code;
-    await enterRoom(code);
-  }catch(err){
-    toast('방 생성 실패: '+(err&&err.message?err.message:String(err)));
-    if(btn) btn.disabled=false;
-  }
+onAction('createRoom',()=>{
+  confirmAction(
+    '새 방을 생성하시겠습니까? 방을 만든 분이 방장이 되어 참여 인원을 관리할 수 있습니다.',
+    async()=>{
+      const code=Array.from({length:6},()=>'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random()*32)]).join('');
+      try{
+        await fsCreateRoom(code);
+        localStorage.setItem('ssc_room',code);
+        state.roomCode=code;
+        await enterRoom(code);
+      }catch(err){
+        toast('방 생성 실패: '+(err&&err.message?err.message:String(err)));
+      }
+    },
+    '생성',true
+  );
 });
 
 onAction('joinRoom',async()=>{
@@ -701,6 +755,21 @@ onAction('joinRoom',async()=>{
 
 async function enterRoom(code){
   state.roomCode=code;
+  state.deviceId=getDeviceId();
+  state.myJoinedAt=new Date().toISOString();
+  // 방 정보 확인 및 방장 판별
+  let room=null;
+  try{ room=await fsGetRoom(code); }catch(e){}
+  if(room && !room.ownerId){
+    // 방장 정보가 없는 예전 방 → 먼저 들어온 사람이 방장을 넘겨받음
+    try{ await fsSetOwner(code,room.createdAt,state.deviceId); room.ownerId=state.deviceId; }catch(e){}
+  }
+  state.roomOwnerId=room?room.ownerId:null;
+  state.isHost=(state.roomOwnerId===state.deviceId);
+  // 멤버 등록
+  try{ await fsJoinRoom(code); }catch(e){}
+  try{ state.members=(await fsListMembers(code)).filter(m=>!isStaleMember(m)); }catch(e){ state.members=[]; }
+
   const events=await fsGetEvents();
   events.forEach(migrateEvent);
   state.events=events;
@@ -709,37 +778,138 @@ async function enterRoom(code){
   renderApp();
 }
 
+/* 방이 사라졌거나 강퇴당했을 때 초기 화면으로 */
+function handleRoomGone(msg){
+  if(_pollTimer){clearInterval(_pollTimer);_pollTimer=null;}
+  localStorage.removeItem('ssc_room');
+  state.roomCode=null;
+  state.events=[];
+  state.currentEventId=null;
+  state.members=[];
+  state.isHost=false;
+  state.roomOwnerId=null;
+  imageUrlCache.clear();
+  renderRoomScreen();
+  if(msg) toast(msg);
+}
+/* 탭을 닫으면 내 멤버 기록을 지워 이탈 처리 (best-effort) */
+window.addEventListener('pagehide',()=>{
+  if(!state.roomCode) return;
+  try{
+    fetch(_FS+'/rooms/'+state.roomCode+'/members/'+getDeviceId()+'?key='+_KEY,{method:'DELETE',keepalive:true});
+  }catch(e){}
+});
+
 function attachRoomListener(code){
   if(_pollTimer) clearInterval(_pollTimer);
   _lastSnap='';
   _pollTimer=setInterval(async()=>{
-    if(state.syncingFromLocal||!state.roomCode) return;
+    if(!state.roomCode) return;
+    // 1) 내 접속 신호 갱신
+    try{ await fsHeartbeat(state.roomCode); }catch(e){}
+    // 2) 방 존재 확인
+    let room;
+    try{ room=await fsGetRoom(state.roomCode); }catch(e){ return; }
+    if(!room){ handleRoomGone('방이 삭제되었어요'); return; }
+    state.roomOwnerId=room.ownerId||state.roomOwnerId||null;
+    state.isHost=(state.roomOwnerId===state.deviceId);
+    // 3) 멤버 목록 + 오래된 멤버 정리 (방장이 정리)
+    let members;
+    try{ members=await fsListMembers(state.roomCode); }catch(e){ members=state.members||[]; }
+    const stale=members.filter(isStaleMember);
+    if(stale.length && state.isHost){
+      for(const m of stale){ try{ await fsKickMember(state.roomCode,m.deviceId); }catch(e){} }
+    }
+    members=members.filter(m=>!isStaleMember(m));
+    // 4) 내가 강퇴됐는지 확인
+    if(!members.find(m=>m.deviceId===state.deviceId)){ handleRoomGone('방에서 내보내졌어요'); return; }
+    state.members=members;
+    // 5) 행사 데이터 동기화
+    let events=state.events;
+    try{ events=await fsGetEvents(); }catch(e){ events=state.events; }
+    const evSnap=events.map(e=>e.id+':'+(e.transactions||[]).length+':'+(e.products||[]).length).join('|');
+    const memSnap=members.map(m=>m.deviceId+':'+(m.name||'')).join('|')+'|host:'+(state.isHost?1:0);
+    const snap=evSnap+'||'+memSnap;
+    if(snap===_lastSnap) return;
+    _lastSnap=snap;
+    if(state.syncingFromLocal) return; // 로컬 저장 중이면 덮어쓰기 방지
     const modal=document.getElementById('modalRoot');
-    if(modal&&!modal.classList.contains('hidden')) return;
-    try{
-      const events=await fsGetEvents();
-      const snap=events.map(e=>e.id+':'+(e.transactions||[]).length+':'+(e.products||[]).length).join('|');
-      if(snap===_lastSnap) return;
-      _lastSnap=snap;
-      events.forEach(migrateEvent);
-      state.events=events;
-      if(!state.currentEventId&&state.events.length>0) state.currentEventId=state.events[0].id;
-      renderApp();
-    }catch(e){}
+    if(modal&&!modal.classList.contains('hidden')) return; // 모달 열려 있으면 다시 그리지 않음
+    events.forEach(migrateEvent);
+    state.events=events;
+    if(!state.currentEventId&&state.events.length>0) state.currentEventId=state.events[0].id;
+    renderApp();
   },5000);
 }
 
 onAction('leaveRoom',()=>{
-  confirmAction('방에서 나가면 이 기기에서 데이터 접근이 끊겨요. 나가시겠어요?',()=>{
-    localStorage.removeItem('ssc_room');
-    if(_pollTimer){clearInterval(_pollTimer);_pollTimer=null;}
-    state.roomCode=null;
-    state.events=[];
-    state.currentEventId=null;
-    imageUrlCache.clear();
-    renderRoomScreen();
+  confirmAction('방에서 나가면 이 기기에서 데이터 접근이 끊겨요. 나가시겠어요?',async()=>{
+    const code=state.roomCode;
+    try{ await fsLeaveMember(code); }catch(e){}
+    // 남은 인원 확인
+    let remaining=[];
+    try{ remaining=(await fsListMembers(code)).filter(m=>!isStaleMember(m)&&m.deviceId!==state.deviceId); }catch(e){}
+    if(remaining.length===0){
+      // 마지막 인원 → 방 통째로 삭제
+      await fsDeleteRoomDeep(code).catch(()=>{});
+    }else if(state.isHost){
+      // 방장이 나가면 가장 먼저 들어온 사람에게 위임
+      let room=null; try{ room=await fsGetRoom(code); }catch(e){}
+      remaining.sort((a,b)=>new Date(a.joinedAt||0)-new Date(b.joinedAt||0));
+      try{ await fsSetOwner(code,room&&room.createdAt,remaining[0].deviceId); }catch(e){}
+    }
+    handleRoomGone('방에서 나갔어요');
   },'나가기');
 });
+
+/* -------- 인원 관리 (방장) -------- */
+onAction('saveMyName',async()=>{
+  const name=(document.getElementById('f_myname').value||'').trim();
+  localStorage.setItem('ssc_name',name);
+  try{ await fsHeartbeat(state.roomCode); }catch(e){}
+  const me=(state.members||[]).find(m=>m.deviceId===state.deviceId);
+  if(me) me.name=name;
+  renderTab();
+  toast('이름을 저장했어요');
+});
+onAction('kickMember',(el)=>{
+  if(!state.isHost) return;
+  const id=el.dataset.id;
+  confirmAction('이 인원을 방에서 내보낼까요?',async()=>{
+    try{ await fsKickMember(state.roomCode,id); }catch(e){}
+    state.members=(state.members||[]).filter(m=>m.deviceId!==id);
+    renderTab();
+    toast('내보냈어요');
+  },'내보내기');
+});
+function renderMembersPanel(){
+  const members=(state.members||[]).slice().sort((a,b)=>new Date(a.joinedAt||0)-new Date(b.joinedAt||0));
+  const myName=localStorage.getItem('ssc_name')||'';
+  return '<div class="card" style="margin-bottom:16px;">'+
+    '<div class="section-title">참여 인원 '+members.length+'명'+(state.isHost?' · 나는 방장':'')+'</div>'+
+    '<div class="field">'+
+      '<label>내 표시 이름</label>'+
+      '<div style="display:flex;gap:8px;">'+
+        '<input class="input" id="f_myname" value="'+escapeHTML(myName)+'" placeholder="이름 입력">'+
+        '<button class="btn" style="flex:none;" data-action="saveMyName">저장</button>'+
+      '</div>'+
+    '</div>'+
+    '<div class="list">'+
+      members.map(m=>{
+        const isMe=m.deviceId===state.deviceId;
+        const isOwner=m.deviceId===state.roomOwnerId;
+        const label=(m.name||'이름 없음')+(isMe?' (나)':'');
+        return '<div class="list-row">'+
+          '<div class="main">'+
+            '<div class="t1">'+(isOwner?'👑 ':'')+escapeHTML(label)+'</div>'+
+            '<div class="t2">'+(isOwner?'방장':'참여자')+'</div>'+
+          '</div>'+
+          ((state.isHost&&!isMe)?'<div class="row-actions"><button class="btn btn-danger" data-action="kickMember" data-id="'+m.deviceId+'">내보내기</button></div>':'')+
+        '</div>';
+      }).join('')+
+    '</div>'+
+  '</div>';
+}
 
 /* -------- app shell -------- */
 function renderApp(){
@@ -808,9 +978,19 @@ handlers.switchEvent=(el)=>{
 };
 
 onAction('newEvent',()=>{
+  const others=state.events;
+  const cloneField=others.length
+    ?'<div class="field"><label>이전 행사에서 상품 가져오기 (선택)</label>'+
+       '<select class="select" id="f_evclone"><option value="">가져오지 않음</option>'+
+       others.map(e=>'<option value="'+e.id+'">'+escapeHTML(e.name)+' (상품 '+e.products.length+'개)</option>').join('')+
+       '</select>'+
+       '<div style="font-size:12px;color:var(--muted);margin-top:4px;">작가·태그·상품·이미지를 복사합니다. 판매 기록과 지출은 복사하지 않습니다.</div>'+
+     '</div>'
+    :'';
   openModal(
     '<h3>새 행사 만들기</h3>'+
     '<div class="field"><label>행사 이름</label><input class="input" id="f_evname"></div>'+
+    cloneField+
     '<div class="modal-actions">'+
       '<button class="btn" data-action="closeModal">취소</button>'+
       '<button class="btn btn-primary" data-action="saveNewEvent">만들기</button>'+
@@ -818,16 +998,39 @@ onAction('newEvent',()=>{
   );
   setTimeout(()=>{const f=document.getElementById('f_evname'); if(f) f.focus();},50);
 });
+/* 행사 복제: 작가·태그·상품(+이미지 참조)만 복사 */
+function cloneEventContent(src,dest){
+  const artistIdMap=new Map();
+  src.artists.forEach(a=>{ const nid=uid(); artistIdMap.set(a.id,nid); dest.artists.push({id:nid,name:a.name,color:a.color}); });
+  const tagIdMap=new Map();
+  src.tags.forEach(t=>{ const nid=uid(); tagIdMap.set(t.id,nid); dest.tags.push({id:nid,name:t.name}); });
+  src.products.forEach(p=>{
+    dest.products.push({
+      id:uid(),
+      detailName:p.detailName,
+      artistId:p.artistId?(artistIdMap.get(p.artistId)||null):null,
+      price:p.price,
+      imageId:p.imageId||null, // 이미지는 방 단위로 공유되므로 같은 id를 재사용
+      tagId:p.tagId?(tagIdMap.get(p.tagId)||null):null
+    });
+  });
+}
 onAction('saveNewEvent',async()=>{
   const name=document.getElementById('f_evname').value.trim();
   if(!name){toast('행사 이름을 입력해주세요');return;}
   const ev={id:uid(),name,memo:'',createdAt:nowISO(),sessions:[],artists:[],tags:[],products:[],transactions:[],expenses:[]};
+  const cloneSel=document.getElementById('f_evclone');
+  const cloneId=cloneSel?cloneSel.value:'';
+  if(cloneId){
+    const src=state.events.find(e=>e.id===cloneId);
+    if(src) cloneEventContent(src,ev);
+  }
   state.events.push(ev);
   state.currentEventId=ev.id;
   await fsSaveEvent(ev);
   closeModal();
   renderApp();
-  toast('행사를 만들었어요');
+  toast(cloneId?'행사를 복제했어요':'행사를 만들었어요');
 });
 onAction('editEvent',(el)=>{
   const id=(el&&el.dataset&&el.dataset.id)||state.currentEventId;
@@ -908,6 +1111,7 @@ function renderEventsList(){
       '</div>'+
       '<button class="btn btn-danger" data-action="leaveRoom">방 나가기</button>'+
     '</div>'+
+    renderMembersPanel()+
     '<div style="display:flex;justify-content:flex-end;margin-bottom:12px;"><button class="btn btn-accent" data-action="newEvent">+ 새 행사</button></div>'+
     '<div class="list">'+
     state.events.map(ev=>{
@@ -1470,7 +1674,13 @@ onAction('cartDec',(el)=>{
   renderTab();
 });
 onAction('clearCart',()=>{state.cart=[];renderTab();});
-onAction('checkout',async(el)=>{
+let checkoutBusy=false;      // 저장 진행 중 중복 결제 차단
+let pendingCashConfirm=null; // 현금 결제 모달 확인 콜백
+let cashTotal=0;
+
+onAction('checkout',(el)=>{
+  if(checkoutBusy) return;        // 이전 결제가 저장되는 동안 재클릭 무시
+  if(state.cart.length===0) return;
   const ev=currentEvent();
   const method=el.dataset.method;
   const items=state.cart.map(c=>{
@@ -1479,11 +1689,70 @@ onAction('checkout',async(el)=>{
     return{productId:p.id,detailName:p.detailName,artistId:p.artistId,artistName:artist?artist.name:'',unitPrice:p.price,qty:c.qty,subtotal:p.price*c.qty};
   });
   const total=items.reduce((s,i)=>s+i.subtotal,0);
+  if(method==='cash'){
+    openCashModal(total,()=>finalizeCheckout(ev,method,items,total));
+    return;
+  }
+  finalizeCheckout(ev,method,items,total);
+});
+
+function finalizeCheckout(ev,method,items,total){
+  if(checkoutBusy) return;
+  checkoutBusy=true;
   ev.transactions.push({id:uid(),sessionId:state.currentSessionId,timestamp:nowISO(),paymentMethod:method,items,total});
-  await saveEvent();
   state.cart=[];
-  renderTab();
+  renderTab();                    // 저장을 기다리지 않고 화면 먼저 갱신 (딜레이 제거)
   toast(method==='cash'?'현금 결제 완료':'계좌이체 결제 완료');
+  saveEvent()
+    .catch(()=>toast('저장에 실패했어요. 네트워크를 확인해주세요'))
+    .finally(()=>{checkoutBusy=false;});
+}
+
+/* ---- 현금 거스름돈 계산 ---- */
+function cashQuickAmounts(total){
+  const set=new Set();
+  [1000,5000,10000,50000].forEach(u=>{ const v=Math.ceil(total/u)*u; if(v>total) set.add(v); });
+  return Array.from(set).sort((a,b)=>a-b).slice(0,4);
+}
+function updateCashChange(){
+  const el=document.getElementById('cashChange');
+  if(!el) return;
+  const recv=Number(document.getElementById('f_cashRecv').value)||0;
+  const change=recv-cashTotal;
+  if(recv===0){ el.textContent='₩0'; el.style.color='var(--muted)'; return; }
+  if(change<0){ el.textContent='부족 '+won(-change); el.style.color='var(--danger)'; }
+  else{ el.textContent=won(change); el.style.color='var(--accent)'; }
+}
+function openCashModal(total,onConfirm){
+  cashTotal=total;
+  pendingCashConfirm=onConfirm;
+  const quick=cashQuickAmounts(total);
+  openModal(
+    '<h3>현금 결제</h3>'+
+    '<div class="field"><label>결제 금액</label><div style="font-size:26px;font-weight:800;">'+won(total)+'</div></div>'+
+    '<div class="field"><label>받은 금액</label><input class="input" type="number" inputmode="numeric" min="0" id="f_cashRecv" data-livechange="cashRecvInput" placeholder="0" style="font-size:20px;"></div>'+
+    '<div class="chip-row">'+
+      '<button type="button" class="chip" data-action="cashQuick" data-amt="'+total+'">정확히</button>'+
+      quick.map(a=>'<button type="button" class="chip" data-action="cashQuick" data-amt="'+a+'">'+won(a)+'</button>').join('')+
+    '</div>'+
+    '<div class="field"><label>거스름돈</label><div id="cashChange" style="font-size:26px;font-weight:800;color:var(--muted);">₩0</div></div>'+
+    '<div class="modal-actions">'+
+      '<button class="btn" data-action="closeModal">취소</button>'+
+      '<button class="btn btn-primary" data-action="cashComplete">결제 완료</button>'+
+    '</div>'
+  );
+  setTimeout(()=>{const f=document.getElementById('f_cashRecv'); if(f) f.focus();},50);
+}
+handlers.cashRecvInput=()=>updateCashChange();
+onAction('cashQuick',(el)=>{
+  const f=document.getElementById('f_cashRecv');
+  if(f){ f.value=el.dataset.amt; updateCashChange(); }
+});
+onAction('cashComplete',()=>{
+  const cb=pendingCashConfirm;
+  pendingCashConfirm=null;
+  closeModal();
+  if(cb) cb();
 });
 </script>
 <script>
@@ -1953,7 +2222,7 @@ onAction('exportSummary',()=>{
     rows.push([title]);
     rows.push(withSub?['이름','작가','수량','매출']:['이름','수량','매출']);
     const map=computeBreakdown(txs,ev,mode);
-    Array.from(map.values()).sort((a,b)=>b.amount-a.amount).forEach(r=>{
+    Array.from(map.values()).sort((a,b)=>(a.label||'').localeCompare(b.label||'','ko',{numeric:true,sensitivity:'base'})).forEach(r=>{
       rows.push(withSub?[r.label,r.sub||'미지정',r.qty,r.amount]:[r.label,r.qty,r.amount]);
     });
     rows.push([]);
