@@ -1448,7 +1448,31 @@ handlers.pickImage=async(el)=>{
 };
 function tagOptionsHTML(ev,selectedId){
   return '<option value="">미지정</option>'+
-    ev.tags.map(t=>'<option value="'+t.id+'" '+(t.id===selectedId?'selected':'')+'>'+escapeHTML(t.name)+'</option>').join('');
+    ev.tags.map(t=>'<option value="'+t.id+'" '+(t.id===selectedId?'selected':'')+'>'+escapeHTML(t.name)+'</option>').join('')+
+    '<option value="__new__">기타 (새 태그 추가)</option>';
+}
+/* 태그 select에서 '기타'를 고른 경우에만 새 태그 입력창을 노출 */
+handlers.tagSelectChange=(el)=>{
+  const area=document.getElementById('newTagArea');
+  if(area) area.classList.toggle('hidden',el.value!=='__new__');
+  if(el.value==='__new__'){
+    const inp=document.getElementById('f_newtag');
+    if(inp) inp.focus();
+  }
+};
+/* 저장 시점의 태그 id 결정: '기타' + 입력값이면 새 태그 생성 */
+function resolveSelectedTagId(){
+  const select=document.getElementById('f_tag');
+  if(!select) return null;
+  const val=select.value;
+  if(val!=='__new__') return val||null;
+  const inp=document.getElementById('f_newtag');
+  const name=inp?inp.value.trim():'';
+  if(!name) return null;
+  const ev=currentEvent();
+  let tag=ev.tags.find(t=>t.name===name);
+  if(!tag){ tag={id:uid(),name}; ev.tags.push(tag); }
+  return tag.id;
 }
 onAction('addInlineTag',async()=>{
   const input=document.getElementById('f_newtag');
@@ -1460,6 +1484,8 @@ onAction('addInlineTag',async()=>{
   input.value='';
   const select=document.getElementById('f_tag');
   if(select) select.innerHTML=tagOptionsHTML(ev,tag.id);
+  const area=document.getElementById('newTagArea');
+  if(area) area.classList.add('hidden');
 });
 function productFormHTML(p,ev){
   return '<div class="img-pick">'+
@@ -1474,8 +1500,8 @@ function productFormHTML(p,ev){
       '<div class="field"><label>가격</label><input class="input" type="number" inputmode="numeric" min="0" id="f_price" placeholder="0" value="'+(p?p.price:'')+'"></div>'+
     '</div>'+
     '<div class="field"><label>태그 (분류 기준, 선택)</label>'+
-      '<select class="select" id="f_tag" style="margin-bottom:8px;">'+tagOptionsHTML(ev,p?p.tagId:null)+'</select>'+
-      '<div style="display:flex;gap:8px;">'+
+      '<select class="select" id="f_tag" data-change="tagSelectChange" style="margin-bottom:8px;">'+tagOptionsHTML(ev,p?p.tagId:null)+'</select>'+
+      '<div id="newTagArea" class="hidden" style="display:flex;gap:8px;">'+
         '<input class="input" id="f_newtag" placeholder="새 태그 이름">'+
         '<button type="button" class="btn" data-action="addInlineTag" style="flex:none;">추가</button>'+
       '</div>'+
@@ -1511,7 +1537,7 @@ onAction('saveNewProduct',async()=>{
     ev.products.push({
       id:uid(),detailName,
       artistId:document.getElementById('f_artist').value||null,price,imageId,
-      tagId:document.getElementById('f_tag').value||null
+      tagId:resolveSelectedTagId()
     });
     await saveEvent();closeModal();renderTab();toast('상품을 추가했어요');
   }catch(err){
@@ -1541,7 +1567,7 @@ onAction('saveEditProduct',async(el)=>{
     p.detailName=detailName;
     p.artistId=document.getElementById('f_artist').value||null;
     p.price=Number(document.getElementById('f_price').value)||0;
-    p.tagId=document.getElementById('f_tag').value||null;
+    p.tagId=resolveSelectedTagId();
     if(pendingImageBlob) p.imageId=await saveImageBlob(pendingImageBlob);
     await saveEvent();closeModal();renderTab();
   }catch(err){
@@ -1708,32 +1734,36 @@ function finalizeCheckout(ev,method,items,total){
     .finally(()=>{checkoutBusy=false;});
 }
 
-/* ---- 현금 거스름돈 계산 ---- */
-function cashQuickAmounts(total){
-  const set=new Set();
-  [1000,5000,10000,50000].forEach(u=>{ const v=Math.ceil(total/u)*u; if(v>total) set.add(v); });
-  return Array.from(set).sort((a,b)=>a-b).slice(0,4);
-}
-function updateCashChange(){
-  const el=document.getElementById('cashChange');
-  if(!el) return;
-  const recv=Number(document.getElementById('f_cashRecv').value)||0;
-  const change=recv-cashTotal;
-  if(recv===0){ el.textContent='₩0'; el.style.color='var(--muted)'; return; }
-  if(change<0){ el.textContent='부족 '+won(-change); el.style.color='var(--danger)'; }
-  else{ el.textContent=won(change); el.style.color='var(--accent)'; }
+/* ---- 현금 거스름돈 계산 (버튼 누적 입력) ---- */
+let cashReceived=0;
+function updateCashDisplay(){
+  const recvEl=document.getElementById('cashRecv');
+  if(recvEl) recvEl.textContent=won(cashReceived);
+  const changeEl=document.getElementById('cashChange');
+  if(changeEl){
+    const change=cashReceived-cashTotal;
+    if(cashReceived===0){ changeEl.textContent='₩0'; changeEl.style.color='var(--muted)'; }
+    else if(change<0){ changeEl.textContent='부족 '+won(-change); changeEl.style.color='var(--danger)'; }
+    else{ changeEl.textContent=won(change); changeEl.style.color='var(--accent)'; }
+  }
 }
 function openCashModal(total,onConfirm){
   cashTotal=total;
+  cashReceived=0;
   pendingCashConfirm=onConfirm;
-  const quick=cashQuickAmounts(total);
   openModal(
     '<h3>현금 결제</h3>'+
     '<div class="field"><label>결제 금액</label><div style="font-size:26px;font-weight:800;">'+won(total)+'</div></div>'+
-    '<div class="field"><label>받은 금액</label><input class="input" type="number" inputmode="numeric" min="0" id="f_cashRecv" data-livechange="cashRecvInput" placeholder="0" style="font-size:20px;"></div>'+
-    '<div class="chip-row">'+
-      '<button type="button" class="chip" data-action="cashQuick" data-amt="'+total+'">정확히</button>'+
-      quick.map(a=>'<button type="button" class="chip" data-action="cashQuick" data-amt="'+a+'">'+won(a)+'</button>').join('')+
+    '<div class="field"><label>받은 금액</label>'+
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">'+
+        '<div id="cashRecv" style="font-size:26px;font-weight:800;">₩0</div>'+
+        '<button type="button" class="btn btn-ghost" data-action="cashReset">초기화</button>'+
+      '</div>'+
+    '</div>'+
+    '<div style="display:flex;gap:8px;margin-bottom:14px;">'+
+      '<button type="button" class="btn btn-lg" style="flex:1;" data-action="cashAdd" data-amt="1000">+1,000</button>'+
+      '<button type="button" class="btn btn-lg" style="flex:1;" data-action="cashAdd" data-amt="5000">+5,000</button>'+
+      '<button type="button" class="btn btn-lg" style="flex:1;" data-action="cashAdd" data-amt="10000">+10,000</button>'+
     '</div>'+
     '<div class="field"><label>거스름돈</label><div id="cashChange" style="font-size:26px;font-weight:800;color:var(--muted);">₩0</div></div>'+
     '<div class="modal-actions">'+
@@ -1741,12 +1771,14 @@ function openCashModal(total,onConfirm){
       '<button class="btn btn-primary" data-action="cashComplete">결제 완료</button>'+
     '</div>'
   );
-  setTimeout(()=>{const f=document.getElementById('f_cashRecv'); if(f) f.focus();},50);
 }
-handlers.cashRecvInput=()=>updateCashChange();
-onAction('cashQuick',(el)=>{
-  const f=document.getElementById('f_cashRecv');
-  if(f){ f.value=el.dataset.amt; updateCashChange(); }
+onAction('cashAdd',(el)=>{
+  cashReceived+=Number(el.dataset.amt)||0;
+  updateCashDisplay();
+});
+onAction('cashReset',()=>{
+  cashReceived=0;
+  updateCashDisplay();
 });
 onAction('cashComplete',()=>{
   const cb=pendingCashConfirm;
